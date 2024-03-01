@@ -1,0 +1,24 @@
+[package]
+name = "rustybfd"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+libc = "0.2"
+# rtnetlink = "0.14"
+# network-types = "0.0.5"
+etherparse = "0.14"
+smallvec = "1.13"
+bytemuck = { version = "1.14", features = ["derive"] }
+md-5 = "0.10"
+sha1 = "0.10"
+derivative = "2.2"
+strum = "0.26"
+strum_macros = "0.26"
+
+[dev-dependencies]
+insta = { version = "1.23", features = ["redactions", "yaml", "json", "ron"] }

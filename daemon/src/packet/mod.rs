@@ -134,8 +134,8 @@ impl StateFlags {
 #[derive(Default, Copy, Clone, Zeroable)]
 #[repr(C)]
 pub struct CtrlPacket {
-  pub v_d: VerDiag,    /* Version and diagnostic */
-  pub s_f: StateFlags, /* State and flags */
+  pub ver_and_diag: VerDiag,       /* Version and diagnostic */
+  pub state_and_flags: StateFlags, /* State and flags */
   pub detect_mult: u8,
   pub length: u8,  /* Whole packet length */
   pub snd_id: u32, /* Sender ID, aka 'my discriminator' */
@@ -266,8 +266,8 @@ impl std::fmt::Debug for CtrlPacket {
     };
 
     f.debug_struct("CtrlPacket")
-      .field("vdiag", &self.v_d)
-      .field("flags", &self.s_f)
+      .field("ver_and_diag", &self.ver_and_diag)
+      .field("state_and_flags", &self.state_and_flags)
       .field("detect_mult", &self.detect_mult)
       .field("length", &self.length)
       .field("snd_id", &u32::from_be(self.snd_id))
@@ -310,13 +310,13 @@ mod test {
 
     insta::assert_debug_snapshot!(recv_buff, @r###"
     CtrlPacket {
-        vdiag: VerDiag {
+        ver_and_diag: VerDiag {
             version: 1,
             diagnostic: Some(
                 NoDiagnostic,
             ),
         },
-        flags: StateFlags {
+        state_and_flags: StateFlags {
             state: Down,
             flag_poll: false,
             flag_final: false,

@@ -19,6 +19,7 @@ sha1 = "0.10"
 derivative = "2.2"
 strum = "0.26"
 strum_macros = "0.26"
+bitflags = "2.4"
 
 [dev-dependencies]
 insta = { version = "1.23", features = ["redactions", "yaml", "json", "ron"] }

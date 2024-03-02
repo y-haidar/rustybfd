@@ -1,5 +1,6 @@
 use std::mem::size_of;
 
+use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use derivative::Derivative;
 use strum_macros::FromRepr;
@@ -57,77 +58,32 @@ pub enum State {
   Init,
   Up,
 }
-#[derive(Default, PartialEq, Copy, Clone, Zeroable, Pod)]
-#[repr(C)]
-pub struct StateFlags(u8);
+// #[derive(Default, PartialEq, Copy, Clone, Zeroable, Pod)]
+// #[repr(C)]
+// pub struct StateFlags(u8);
+
+bitflags! {
+  /// Represents a set of flags.
+  #[derive(Default, PartialEq, Copy, Clone)]
+  #[repr(C)]
+  pub struct StateFlags: u8 {
+      const F_POLL = 0b00100000;
+      const F_FINAL = 0b00010000;
+      const F_CPI = 0b00001000;
+      const F_AUTH_PRESENT = 0b00000100;
+      const F_DEMAND = 0b00000010;
+      /// This bit is reserved for future point-to-multipoint extensions to
+      /// BFD. It MUST be zero on both transmit and receipt.
+      const F_MULTIPOINT = 0b00000001;
+  }
+}
+
+unsafe impl Zeroable for StateFlags {}
+unsafe impl Pod for StateFlags {}
+
 impl StateFlags {
-  const F_POLL: u8 = 5;
-  const F_FINAL: u8 = 4;
-  const F_CPI: u8 = 3;
-  const F_AUTH_PRESENT: u8 = 2;
-  const F_DEMAND: u8 = 1;
-  /// This bit is reserved for future point-to-multipoint extensions to
-  /// BFD. It MUST be zero on both transmit and receipt.
-  const F_MULTIPOINT: u8 = 0;
-
   pub fn get_state(&self) -> State {
-    State::from_repr((self.0 >> 6) as usize).unwrap()
-  }
-
-  pub fn has_poll(&self) -> bool {
-    self.0 & (1 << Self::F_POLL) > 0
-  }
-  pub fn has_final(&self) -> bool {
-    self.0 & (1 << Self::F_FINAL) > 0
-  }
-  pub fn has_cpi(&self) -> bool {
-    self.0 & (1 << Self::F_CPI) > 0
-  }
-  pub fn has_auth_present(&self) -> bool {
-    self.0 & (1 << Self::F_AUTH_PRESENT) > 0
-  }
-  pub fn has_demand(&self) -> bool {
-    self.0 & (1 << Self::F_DEMAND) > 0
-  }
-  pub fn has_multipoint(&self) -> bool {
-    self.0 & (1 << Self::F_MULTIPOINT) > 0
-  }
-
-  pub fn set_poll(&mut self) {
-    self.0 |= 1 << Self::F_POLL;
-  }
-  pub fn unset_poll(&mut self) {
-    self.0 &= 0xff ^ (1 << Self::F_POLL);
-  }
-  pub fn set_final(&mut self) {
-    self.0 |= 1 << Self::F_FINAL;
-  }
-  pub fn unset_final(&mut self) {
-    self.0 &= 0xff ^ (1 << Self::F_FINAL);
-  }
-  pub fn set_cpi(&mut self) {
-    self.0 |= 1 << Self::F_CPI;
-  }
-  pub fn unset_cpi(&mut self) {
-    self.0 &= 0xff ^ (1 << Self::F_CPI);
-  }
-  pub fn set_auth_present(&mut self) {
-    self.0 |= 1 << Self::F_AUTH_PRESENT;
-  }
-  pub fn unset_auth_present(&mut self) {
-    self.0 &= 0xff ^ (1 << Self::F_AUTH_PRESENT);
-  }
-  pub fn set_demand(&mut self) {
-    self.0 |= 1 << Self::F_DEMAND;
-  }
-  pub fn unset_demand(&mut self) {
-    self.0 &= 0xff ^ (1 << Self::F_DEMAND);
-  }
-  pub fn set_multipoint(&mut self) {
-    self.0 |= 1 << Self::F_MULTIPOINT;
-  }
-  pub fn unset_multipoint(&mut self) {
-    self.0 &= 0xff ^ (1 << Self::F_MULTIPOINT);
+    State::from_repr((self.0.bits() >> 6) as usize).unwrap()
   }
 }
 
@@ -233,12 +189,7 @@ impl std::fmt::Debug for StateFlags {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("StateFlags")
       .field("state", &self.get_state())
-      .field("flag_poll", &self.has_poll())
-      .field("flag_final", &self.has_final())
-      .field("flag_cpi", &self.has_cpi())
-      .field("flag_auth_present", &self.has_auth_present())
-      .field("flag_demand", &self.has_demand())
-      .field("flag_multipoint", &self.has_multipoint())
+      .field("flags", &StateFlags::from_bits_truncate(self.0.bits()).0)
       .finish()
   }
 }
@@ -318,12 +269,7 @@ mod test {
         },
         state_and_flags: StateFlags {
             state: Down,
-            flag_poll: false,
-            flag_final: false,
-            flag_cpi: false,
-            flag_auth_present: true,
-            flag_demand: false,
-            flag_multipoint: false,
+            flags: F_AUTH_PRESENT,
         },
         detect_mult: 3,
         length: 48,

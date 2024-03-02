@@ -39,7 +39,7 @@ pub enum Diagnostic {
   RevConcatPathDown,
   // 9-31 -- Reserved for future use
 }
-#[derive(Default, PartialEq, Copy, Clone, Zeroable, Pod)]
+#[derive(PartialEq, Copy, Clone, Zeroable, Pod)]
 #[repr(C)]
 pub struct VerDiag(u8);
 impl VerDiag {
@@ -50,6 +50,12 @@ impl VerDiag {
     Diagnostic::from_repr(self.0 & 0b00011111u8)
   }
 }
+impl Default for VerDiag {
+  fn default() -> Self {
+    Self(1 << 5)
+  }
+}
+
 #[derive(Default, Debug, PartialEq, FromRepr)]
 pub enum State {
   #[default]

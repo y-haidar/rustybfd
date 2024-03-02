@@ -79,11 +79,11 @@ unsafe impl Pod for StateFlags {}
 
 impl StateFlags {
   pub fn get_state(&self) -> State {
-    State::from_repr((self.0.bits() >> 6) as usize).unwrap()
+    State::from_repr((self.bits() >> 6) as usize).unwrap()
   }
 }
 
-#[derive(Default, Copy, Clone, Zeroable)]
+#[derive(Default, Copy, Clone, Zeroable, Pod)]
 #[repr(C)]
 pub struct CtrlPacket {
   pub ver_and_diag: VerDiag,       /* Version and diagnostic */
@@ -99,7 +99,6 @@ pub struct CtrlPacket {
   pub auth_header: AuthHeader,
   pub auth_data: [u8; size_of::<AuthSha1>()],
 }
-unsafe impl Pod for CtrlPacket {}
 
 #[derive(Debug, Default, Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
@@ -139,7 +138,7 @@ impl<'a> AuthType<'a> {
 // }
 // unsafe impl Pod for AuthSimple {}
 
-#[derive(Derivative, Default, Copy, Clone, Zeroable)]
+#[derive(Derivative, Default, Copy, Clone, Zeroable, Pod)]
 #[derivative(Debug)]
 #[repr(C)]
 /// Section https://www.rfc-editor.org/rfc/rfc5880#section-4.3
@@ -153,9 +152,8 @@ pub struct AuthMd5 {
   /// Auth Key/Digest
   pub digest: [u8; 16], // 24 from RFC but - bytes in AuthHeader
 }
-unsafe impl Pod for AuthMd5 {}
 
-#[derive(Derivative, Default, Copy, Clone, Zeroable)]
+#[derive(Derivative, Default, Copy, Clone, Zeroable, Pod)]
 #[derivative(Debug)]
 #[repr(C)]
 /// Section https://www.rfc-editor.org/rfc/rfc5880#section-4.4
@@ -169,7 +167,6 @@ pub struct AuthSha1 {
   /// Auth Key/Digest
   pub digest: [u8; 20], // 28 from RFC but - bytes in AuthHeader
 }
-unsafe impl Pod for AuthSha1 {}
 
 impl std::fmt::Debug for VerDiag {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -183,7 +180,7 @@ impl std::fmt::Debug for StateFlags {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("StateFlags")
       .field("state", &self.get_state())
-      .field("flags", &StateFlags::from_bits_truncate(self.0.bits()).0)
+      .field("flags", &StateFlags::from_bits_truncate(self.bits()).0)
       .finish()
   }
 }

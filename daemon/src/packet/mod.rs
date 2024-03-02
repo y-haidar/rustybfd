@@ -110,12 +110,12 @@ pub struct AuthHeader {
   pub __reserved_part_of_pass: u8,
 }
 
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 #[repr(C, u8)]
 #[non_exhaustive]
 pub enum AuthType<'a> {
-  #[default]
-  NoneReserved,
+  /// This should never be used. If it was used by sender, then drop the packet
+  NoneReserved(u8),
   // Simple(&'a AuthSimple),
   SimpleNotSupported,
   Md5(&'a AuthMd5),
@@ -190,7 +190,7 @@ impl std::fmt::Debug for StateFlags {
 impl std::fmt::Debug for CtrlPacket {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     let auth_type = match self.auth_header.typ {
-      AuthType::NONERESERVED => AuthType::NoneReserved,
+      AuthType::NONERESERVED => AuthType::NoneReserved(self.auth_header.typ),
       // Not supported. Alignment was annoying and why use plain password anyway
       // AuthType::SIMPLE => AuthType::Simple(bytemuck::from_bytes(
       //   &self.auth_data[..size_of::<AuthSimple>()],
@@ -207,7 +207,7 @@ impl std::fmt::Debug for CtrlPacket {
       AuthType::METICULOUSSHA1 => AuthType::MeticulousSha1(bytemuck::from_bytes(
         &self.auth_data[..size_of::<AuthSha1>()],
       )),
-      _ => return Err(std::fmt::Error),
+      _ => AuthType::NoneReserved(self.auth_header.typ),
     };
 
     f.debug_struct("CtrlPacket")

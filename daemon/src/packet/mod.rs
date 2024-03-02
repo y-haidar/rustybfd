@@ -105,6 +105,52 @@ pub struct CtrlPacket {
   pub auth_header: AuthHeader,
   pub auth_data: [u8; size_of::<AuthSha1>()],
 }
+impl<'a> CtrlPacket {
+  #[inline]
+  pub fn snd_id_from_be(&self) -> u32 {
+    u32::from_be(self.snd_id)
+  }
+  #[inline]
+  pub fn rcv_id_from_be(&self) -> u32 {
+    u32::from_be(self.rcv_id)
+  }
+  #[inline]
+  pub fn des_min_tx_int_from_be(&self) -> u32 {
+    u32::from_be(self.des_min_tx_int)
+  }
+  #[inline]
+  pub fn req_min_rx_int_from_be(&self) -> u32 {
+    u32::from_be(self.req_min_rx_int)
+  }
+  #[inline]
+  pub fn req_min_echo_rx_int_from_be(&self) -> u32 {
+    u32::from_be(self.req_min_echo_rx_int)
+  }
+  pub fn auth_type(&'a self) -> AuthType<'a> {
+    match self.auth_header.typ {
+      AuthType::NONERESERVED => AuthType::NoneReserved(self.auth_header.typ),
+      AuthType::SIMPLE => {
+        let mut data = [0u8; 16];
+        data[0] = self.auth_header.__reserved_part_of_pass;
+        data[1..].copy_from_slice(&self.auth_data[..15]);
+        AuthType::Simple(AuthSimple { pass: data })
+      }
+      AuthType::MD5 => AuthType::Md5(bytemuck::from_bytes(
+        &self.auth_data[..size_of::<AuthMd5>()],
+      )),
+      AuthType::METICULOUSMD5 => AuthType::Md5(bytemuck::from_bytes(
+        &self.auth_data[..size_of::<AuthMd5>()],
+      )),
+      AuthType::SHA1 => AuthType::Sha1(bytemuck::from_bytes(
+        &self.auth_data[..size_of::<AuthSha1>()],
+      )),
+      AuthType::METICULOUSSHA1 => AuthType::MeticulousSha1(bytemuck::from_bytes(
+        &self.auth_data[..size_of::<AuthSha1>()],
+      )),
+      _ => AuthType::NoneReserved(self.auth_header.typ),
+    }
+  }
+}
 
 #[derive(Debug, Default, Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
@@ -121,8 +167,7 @@ pub struct AuthHeader {
 pub enum AuthType<'a> {
   /// This should never be used. If it was used by sender, then drop the packet
   NoneReserved(u8),
-  // Simple(&'a AuthSimple),
-  SimpleNotSupported,
+  Simple(AuthSimple),
   Md5(&'a AuthMd5),
   MeticulousMd5(&'a AuthMd5),
   Sha1(&'a AuthSha1),
@@ -137,17 +182,20 @@ impl<'a> AuthType<'a> {
   pub const METICULOUSSHA1: u8 = 5;
 }
 
-// #[derive(Debug, Default, Copy, Clone, Zeroable)]
-// #[repr(C)]
-// pub struct AuthSimple {
-//   pub pass: [u8; 16], // 16 from RFC
-// }
-// unsafe impl Pod for AuthSimple {}
+#[derive(Derivative, Default, Copy, Clone, Zeroable, Pod)]
+#[derivative(Debug)]
+#[repr(C)]
+pub struct AuthSimple {
+  #[derivative(Debug(format_with = "fmt_u8_slice_to_hex"))]
+  /// First byte must be copyed from the last byte in AuthHeader
+  pub pass: [u8; 16],
+}
 
 #[derive(Derivative, Default, Copy, Clone, Zeroable, Pod)]
 #[derivative(Debug)]
 #[repr(C)]
 /// Section https://www.rfc-editor.org/rfc/rfc5880#section-4.3
+/// length: 24 from RFC but - bytes in AuthHeader
 pub struct AuthMd5 {
   #[derivative(Debug(format_with = "fmt_u32_from_be"))]
   /// For Keyed MD5 Authentication, this value is incremented occasionally. For
@@ -156,13 +204,14 @@ pub struct AuthMd5 {
   pub seq: u32,
   #[derivative(Debug(format_with = "fmt_u8_slice_to_hex"))]
   /// Auth Key/Digest
-  pub digest: [u8; 16], // 24 from RFC but - bytes in AuthHeader
+  pub digest: [u8; 16],
 }
 
 #[derive(Derivative, Default, Copy, Clone, Zeroable, Pod)]
 #[derivative(Debug)]
 #[repr(C)]
 /// Section https://www.rfc-editor.org/rfc/rfc5880#section-4.4
+/// length: 28 from RFC but - bytes in AuthHeader
 pub struct AuthSha1 {
   #[derivative(Debug(format_with = "fmt_u32_from_be"))]
   /// For Keyed SHA1 Authentication, this value is incremented occasionally. For
@@ -171,7 +220,7 @@ pub struct AuthSha1 {
   pub seq: u32,
   #[derivative(Debug(format_with = "fmt_u8_slice_to_hex"))]
   /// Auth Key/Digest
-  pub digest: [u8; 20], // 28 from RFC but - bytes in AuthHeader
+  pub digest: [u8; 20],
 }
 
 impl std::fmt::Debug for VerDiag {
@@ -192,46 +241,18 @@ impl std::fmt::Debug for StateFlags {
 }
 impl std::fmt::Debug for CtrlPacket {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    let auth_type = match self.auth_header.typ {
-      AuthType::NONERESERVED => AuthType::NoneReserved(self.auth_header.typ),
-      // Not supported. Alignment was annoying and why use plain password anyway
-      // AuthType::SIMPLE => AuthType::Simple(bytemuck::from_bytes(
-      //   &self.auth_data[..size_of::<AuthSimple>()],
-      // )),
-      AuthType::MD5 => AuthType::Md5(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthMd5>()],
-      )),
-      AuthType::METICULOUSMD5 => AuthType::Md5(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthMd5>()],
-      )),
-      AuthType::SHA1 => AuthType::Sha1(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthSha1>()],
-      )),
-      AuthType::METICULOUSSHA1 => AuthType::MeticulousSha1(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthSha1>()],
-      )),
-      _ => AuthType::NoneReserved(self.auth_header.typ),
-    };
+    let auth_type = self.auth_type();
 
     f.debug_struct("CtrlPacket")
       .field("ver_and_diag", &self.ver_and_diag)
       .field("state_and_flags", &self.state_and_flags)
       .field("detect_mult", &self.detect_mult)
       .field("length", &self.length)
-      .field("snd_id", &u32::from_be(self.snd_id))
-      .field("rcv_id", &u32::from_be(self.rcv_id))
-      .field(
-        "des_min_tx_int",
-        &(u32::from_be(self.des_min_tx_int) / 1000),
-      )
-      .field(
-        "req_min_rx_int",
-        &(u32::from_be(self.req_min_rx_int) / 1000),
-      )
-      .field(
-        "req_min_echo_rx_int",
-        &(u32::from_be(self.req_min_echo_rx_int) / 1000),
-      )
+      .field("snd_id", &self.snd_id_from_be())
+      .field("rcv_id", &self.rcv_id_from_be())
+      .field("des_min_tx_int", &self.des_min_tx_int_from_be())
+      .field("req_min_rx_int", &self.req_min_rx_int_from_be())
+      .field("req_min_echo_rx_int", &self.req_min_echo_rx_int_from_be())
       .field("auth_header", &self.auth_header)
       .field("auth_data", &auth_type)
       .finish()
@@ -272,8 +293,8 @@ mod test {
         length: 48,
         snd_id: 1,
         rcv_id: 0,
-        des_min_tx_int: 1000,
-        req_min_rx_int: 1000,
+        des_min_tx_int: 1000000,
+        req_min_rx_int: 1000000,
         req_min_echo_rx_int: 0,
         auth_header: AuthHeader {
             typ: 2,

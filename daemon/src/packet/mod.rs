@@ -58,10 +58,6 @@ pub enum State {
   Init,
   Up,
 }
-// #[derive(Default, PartialEq, Copy, Clone, Zeroable, Pod)]
-// #[repr(C)]
-// pub struct StateFlags(u8);
-
 bitflags! {
   /// Represents a set of flags.
   #[derive(Default, PartialEq, Copy, Clone)]
@@ -148,7 +144,6 @@ impl<'a> AuthType<'a> {
 #[repr(C)]
 /// Section https://www.rfc-editor.org/rfc/rfc5880#section-4.3
 pub struct AuthMd5 {
-  // __reserved: u8, // comment this as this creating alignment/padding issues
   #[derivative(Debug(format_with = "fmt_u32_from_be"))]
   /// For Keyed MD5 Authentication, this value is incremented occasionally. For
   /// Meticulous Keyed MD5 Authentication, this value is incremented for
@@ -165,7 +160,6 @@ unsafe impl Pod for AuthMd5 {}
 #[repr(C)]
 /// Section https://www.rfc-editor.org/rfc/rfc5880#section-4.4
 pub struct AuthSha1 {
-  // __reserved: u8, // comment this as this creating alignment/padding issues
   #[derivative(Debug(format_with = "fmt_u32_from_be"))]
   /// For Keyed SHA1 Authentication, this value is incremented occasionally. For
   /// Meticulous Keyed SHA1 Authentication, this value is incremented for

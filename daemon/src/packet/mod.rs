@@ -157,14 +157,17 @@ impl<'a> AuthHeader {
     match AuthTypeDiscriminants::from_repr(self.typ).unwrap_or(AuthTypeDiscriminants::NoneReserved)
     {
       AuthTypeDiscriminants::NoneReserved => AuthType::NoneReserved(self.typ),
-      AuthTypeDiscriminants::Simple => AuthType::Md5(bytemuck::from_bytes(
-        // Not sure if this is okay; needs more tests
-        if self.lenth > size_of::<AuthSimple>() as u8 {
-          &auth_data[size_of::<Self>() - 1..self.lenth as usize + size_of::<Self>()]
-        } else {
+      AuthTypeDiscriminants::Simple => {
+        AuthType::Simple(if self.lenth > size_of::<AuthSimple>() as u8 {
           panic!("return error instead")
-        },
-      )),
+        } else {
+          let mut pass = [0u8; 16];
+          pass[..self.lenth as usize].copy_from_slice(
+            &auth_data[size_of::<Self>() - 1..self.lenth as usize + size_of::<Self>() - 1],
+          );
+          AuthSimple { pass }
+        })
+      }
       AuthTypeDiscriminants::Md5 => AuthType::Md5(bytemuck::from_bytes(
         &auth_data[size_of::<Self>()..size_of::<AuthMd5>() + size_of::<Self>()],
       )),
@@ -188,7 +191,7 @@ impl<'a> AuthHeader {
 pub enum AuthType<'a> {
   /// This should never be used(the format is malformed). If it was used by sender, then drop the packet
   NoneReserved(u8),
-  Simple(&'a AuthSimple),
+  Simple(AuthSimple),
   Md5(&'a AuthMd5),
   MeticulousMd5(&'a AuthMd5),
   Sha1(&'a AuthSha1),
@@ -277,51 +280,60 @@ mod test {
   use super::*;
 
   #[test]
-  fn test() {
-    let mut recv_buff = CtrlPacket::default();
-
-    let sample_pkt_with_md5_auth = &[
+  #[cfg_attr(miri, ignore)] // miri makes bytemuck give TargetAlignmentGreaterAndInputNotAligned need to research this
+  fn test_example() {
+    let sample_pkt_with_md5_auth = [
       0x20, 0x44, 0x03, 0x30, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x42,
       0x40, 0x00, 0x0f, 0x42, 0x40, 0x00, 0x00, 0x00, 0x00, 0x02, 0x18, 0x01, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x15, 0xa8, 0x06, 0x20, 0x95, 0xd7, 0xa2, 0x3d, 0xb2, 0x43, 0x5e, 0x22, 0x79,
       0x1a, 0x28, 0xa4,
     ];
 
-    let recv_buff_slice = bytemuck::bytes_of_mut(&mut recv_buff);
-    recv_buff_slice[..sample_pkt_with_md5_auth.len()].copy_from_slice(sample_pkt_with_md5_auth);
+    let pkt = CtrlPacket::read_bytes(sample_pkt_with_md5_auth.len(), &sample_pkt_with_md5_auth);
+    insta::assert_debug_snapshot!(pkt, @r###"
+    Some(
+        CtrlPacket {
+            ver_and_diag: VerDiag {
+                version: 1,
+                diagnostic: Some(
+                    NoDiagnostic,
+                ),
+            },
+            state_and_flags: StateFlags {
+                state: Down,
+                flags: F_AUTH_PRESENT,
+            },
+            detect_mult: 3,
+            length: 48,
+            snd_id: 1,
+            rcv_id: 0,
+            des_min_tx_int: 1000000,
+            req_min_rx_int: 1000000,
+            req_min_echo_rx_int: 0,
+        },
+    )
+    "###);
 
-    insta::assert_debug_snapshot!(recv_buff, @r###"
-    CtrlPacket {
-        ver_and_diag: VerDiag {
-            version: 1,
-            diagnostic: Some(
-                NoDiagnostic,
-            ),
-        },
-        state_and_flags: StateFlags {
-            state: Down,
-            flags: F_AUTH_PRESENT,
-        },
-        detect_mult: 3,
-        length: 48,
-        snd_id: 1,
-        rcv_id: 0,
-        des_min_tx_int: 1000000,
-        req_min_rx_int: 1000000,
-        req_min_echo_rx_int: 0,
-        auth_header: AuthHeader {
+    let auth_head = pkt.unwrap().get_auth_header(&sample_pkt_with_md5_auth);
+    insta::assert_debug_snapshot!(auth_head, @r###"
+    Some(
+        AuthHeader {
             typ: 2,
             lenth: 24,
             key_id: 1,
             __reserved_part_of_pass: 0,
         },
-        auth_data: Md5(
-            AuthMd5 {
-                seq: 0,
-                digest: [15, a8, 06, 20, 95, d7, a2, 3d, b2, 43, 5e, 22, 79, 1a, 28, a4],
-            },
-        ),
-    }
+    )
+    "###);
+
+    let auth_type = auth_head.unwrap().get_auth_type(&sample_pkt_with_md5_auth);
+    insta::assert_debug_snapshot!(auth_type, @r###"
+    Md5(
+        AuthMd5 {
+            seq: 0,
+            digest: [15, a8, 06, 20, 95, d7, a2, 3d, b2, 43, 5e, 22, 79, 1a, 28, a4],
+        },
+    )
     "###);
   }
 }

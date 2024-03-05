@@ -3,7 +3,7 @@ use std::mem::size_of;
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use derivative::Derivative;
-use strum_macros::FromRepr;
+use strum_macros::{EnumDiscriminants, FromRepr};
 
 fn fmt_u32_from_be(f: &u32, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
   let _ = fmt.write_str(&u32::from_be(*f).to_string());
@@ -101,9 +101,6 @@ pub struct CtrlPacket {
   pub des_min_tx_int: u32,
   pub req_min_rx_int: u32,
   pub req_min_echo_rx_int: u32,
-
-  pub auth_header: AuthHeader,
-  pub auth_data: [u8; size_of::<AuthSha1>()],
 }
 impl<'a> CtrlPacket {
   #[inline]
@@ -126,28 +123,20 @@ impl<'a> CtrlPacket {
   pub fn req_min_echo_rx_int_from_be(&self) -> u32 {
     u32::from_be(self.req_min_echo_rx_int)
   }
-  pub fn auth_type(&'a self) -> AuthType<'a> {
-    match self.auth_header.typ {
-      AuthType::NONERESERVED => AuthType::NoneReserved(self.auth_header.typ),
-      AuthType::SIMPLE => {
-        let mut data = [0u8; 16];
-        data[0] = self.auth_header.__reserved_part_of_pass;
-        data[1..].copy_from_slice(&self.auth_data[..15]);
-        AuthType::Simple(AuthSimple { pass: data })
-      }
-      AuthType::MD5 => AuthType::Md5(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthMd5>()],
-      )),
-      AuthType::METICULOUSMD5 => AuthType::Md5(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthMd5>()],
-      )),
-      AuthType::SHA1 => AuthType::Sha1(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthSha1>()],
-      )),
-      AuthType::METICULOUSSHA1 => AuthType::MeticulousSha1(bytemuck::from_bytes(
-        &self.auth_data[..size_of::<AuthSha1>()],
-      )),
-      _ => AuthType::NoneReserved(self.auth_header.typ),
+  pub fn get_auth_header(&'a self, data: &'a [u8]) -> Option<&'a AuthHeader> {
+    if self.state_and_flags.contains(StateFlags::F_AUTH_PRESENT) {
+      Some(bytemuck::from_bytes(
+        &data[size_of::<Self>()..size_of::<AuthHeader>() + size_of::<Self>()],
+      ))
+    } else {
+      None
+    }
+  }
+  pub fn read_bytes(len: usize, data: &'a [u8]) -> Option<&'a Self> {
+    if len >= std::mem::size_of::<CtrlPacket>() {
+      Some(bytemuck::from_bytes(&data[..size_of::<Self>()]))
+    } else {
+      None
     }
   }
 }
@@ -160,26 +149,50 @@ pub struct AuthHeader {
   pub key_id: u8,
   pub __reserved_part_of_pass: u8,
 }
+impl<'a> AuthHeader {
+  /// `auth_data` includes and starts at `AuthHeader`
+  pub fn get_auth_type(&'a self, data: &'a [u8]) -> AuthType<'a> {
+    let auth_data = &data[size_of::<CtrlPacket>()..];
+    // TODO: check if length was set correctly in all cases
+    match AuthTypeDiscriminants::from_repr(self.typ).unwrap_or(AuthTypeDiscriminants::NoneReserved)
+    {
+      AuthTypeDiscriminants::NoneReserved => AuthType::NoneReserved(self.typ),
+      AuthTypeDiscriminants::Simple => AuthType::Md5(bytemuck::from_bytes(
+        // Not sure if this is okay; needs more tests
+        if self.lenth > size_of::<AuthSimple>() as u8 {
+          &auth_data[size_of::<Self>() - 1..self.lenth as usize + size_of::<Self>()]
+        } else {
+          panic!("return error instead")
+        },
+      )),
+      AuthTypeDiscriminants::Md5 => AuthType::Md5(bytemuck::from_bytes(
+        &auth_data[size_of::<Self>()..size_of::<AuthMd5>() + size_of::<Self>()],
+      )),
+      AuthTypeDiscriminants::MeticulousMd5 => AuthType::Md5(bytemuck::from_bytes(
+        &auth_data[size_of::<Self>()..size_of::<AuthMd5>() + size_of::<Self>()],
+      )),
+      AuthTypeDiscriminants::Sha1 => AuthType::Sha1(bytemuck::from_bytes(
+        &auth_data[size_of::<Self>()..size_of::<AuthSha1>() + size_of::<Self>()],
+      )),
+      AuthTypeDiscriminants::MeticulousSha1 => AuthType::MeticulousSha1(bytemuck::from_bytes(
+        &auth_data[size_of::<Self>()..size_of::<AuthSha1>() + size_of::<Self>()],
+      )),
+    }
+  }
+}
 
-#[derive(Debug, Copy, Clone)]
-#[repr(C, u8)]
+#[derive(Debug, Copy, Clone, EnumDiscriminants)]
+#[strum_discriminants(derive(FromRepr))]
+#[repr(u8)]
 #[non_exhaustive]
 pub enum AuthType<'a> {
-  /// This should never be used. If it was used by sender, then drop the packet
+  /// This should never be used(the format is malformed). If it was used by sender, then drop the packet
   NoneReserved(u8),
-  Simple(AuthSimple),
+  Simple(&'a AuthSimple),
   Md5(&'a AuthMd5),
   MeticulousMd5(&'a AuthMd5),
   Sha1(&'a AuthSha1),
   MeticulousSha1(&'a AuthSha1),
-}
-impl<'a> AuthType<'a> {
-  pub const NONERESERVED: u8 = 0;
-  pub const SIMPLE: u8 = 1;
-  pub const MD5: u8 = 2;
-  pub const METICULOUSMD5: u8 = 3;
-  pub const SHA1: u8 = 4;
-  pub const METICULOUSSHA1: u8 = 5;
 }
 
 #[derive(Derivative, Default, Copy, Clone, Zeroable, Pod)]
@@ -187,7 +200,7 @@ impl<'a> AuthType<'a> {
 #[repr(C)]
 pub struct AuthSimple {
   #[derivative(Debug(format_with = "fmt_u8_slice_to_hex"))]
-  /// First byte must be copyed from the last byte in AuthHeader
+  /// First byte is inside the last byte of AuthHeader
   pub pass: [u8; 16],
 }
 
@@ -241,7 +254,7 @@ impl std::fmt::Debug for StateFlags {
 }
 impl std::fmt::Debug for CtrlPacket {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    let auth_type = self.auth_type();
+    // let auth_type = self.auth_type();
 
     f.debug_struct("CtrlPacket")
       .field("ver_and_diag", &self.ver_and_diag)
@@ -253,8 +266,8 @@ impl std::fmt::Debug for CtrlPacket {
       .field("des_min_tx_int", &self.des_min_tx_int_from_be())
       .field("req_min_rx_int", &self.req_min_rx_int_from_be())
       .field("req_min_echo_rx_int", &self.req_min_echo_rx_int_from_be())
-      .field("auth_header", &self.auth_header)
-      .field("auth_data", &auth_type)
+      // .field("auth_header", &self.auth_header)
+      // .field("auth_data", &auth_type)
       .finish()
   }
 }

@@ -14,6 +14,9 @@ fn fmt_u8_slice_to_hex(f: &[u8], fmt: &mut std::fmt::Formatter) -> Result<(), st
   Ok(())
 }
 
+pub const MAX_CTRL_PKT_SIZE: usize =
+  size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<AuthSha1>();
+
 #[derive(Default, Debug, PartialEq, FromRepr)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -123,14 +126,8 @@ impl<'a> CtrlPacket {
   pub fn req_min_echo_rx_int_from_be(&self) -> u32 {
     u32::from_be(self.req_min_echo_rx_int)
   }
-  pub fn get_auth_header(&'a self, data: &'a [u8]) -> Option<&'a AuthHeader> {
-    if self.state_and_flags.contains(StateFlags::F_AUTH_PRESENT) {
-      Some(bytemuck::from_bytes(
-        &data[size_of::<Self>()..size_of::<AuthHeader>() + size_of::<Self>()],
-      ))
-    } else {
-      None
-    }
+  pub fn get_auth_header(&'a self, data: &'a [u8]) -> &'a AuthHeader {
+    bytemuck::from_bytes(&data[size_of::<Self>()..size_of::<AuthHeader>() + size_of::<Self>()])
   }
   pub fn read_bytes(len: usize, data: &'a [u8]) -> Option<&'a Self> {
     if len >= std::mem::size_of::<CtrlPacket>() {
@@ -154,8 +151,7 @@ impl<'a> AuthHeader {
   pub fn get_auth_type(&'a self, data: &'a [u8]) -> AuthType<'a> {
     let auth_data = &data[size_of::<CtrlPacket>()..];
     // TODO: check if length was set correctly in all cases
-    match AuthTypeDiscriminants::from_repr(self.typ).unwrap_or(AuthTypeDiscriminants::NoneReserved)
-    {
+    match self.get_auth_type_discriminants() {
       AuthTypeDiscriminants::NoneReserved => AuthType::NoneReserved(self.typ),
       AuthTypeDiscriminants::Simple => {
         AuthType::Simple(if self.lenth > size_of::<AuthSimple>() as u8 {
@@ -181,6 +177,9 @@ impl<'a> AuthHeader {
         &auth_data[size_of::<Self>()..size_of::<AuthSha1>() + size_of::<Self>()],
       )),
     }
+  }
+  pub fn get_auth_type_discriminants(&'a self) -> AuthTypeDiscriminants {
+    AuthTypeDiscriminants::from_repr(self.typ).unwrap_or(AuthTypeDiscriminants::NoneReserved)
   }
 }
 
@@ -326,7 +325,7 @@ mod test {
     )
     "###);
 
-    let auth_type = auth_head.unwrap().get_auth_type(&sample_pkt_with_md5_auth);
+    let auth_type = auth_head.get_auth_type(&sample_pkt_with_md5_auth);
     insta::assert_debug_snapshot!(auth_type, @r###"
     Md5(
         AuthMd5 {

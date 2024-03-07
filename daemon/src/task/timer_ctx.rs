@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 #[async_trait::async_trait]
 pub trait TimerCtxTrait {
-  async fn callback(&self);
+  async fn callback(&mut self);
   async fn duration(&self) -> Duration;
 }
 
@@ -13,7 +13,7 @@ pub struct TimerCtx<Ctx> {
 }
 
 impl<Ctx: TimerCtxTrait + Send + Sync + 'static> TimerCtx<Ctx> {
-  pub fn new(ctx: Ctx) -> Self {
+  pub fn new(mut ctx: Ctx) -> Self {
     let (tx, mut rx) = mpsc::channel(1024);
 
     tokio::spawn(async move {

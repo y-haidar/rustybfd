@@ -1,14 +1,20 @@
+use nix::sys::socket::setsockopt;
 use std::{
   collections::HashMap,
   io,
   net::{IpAddr, SocketAddr},
-  sync::Arc,
+  sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+  },
   time::Duration,
 };
 use tokio::{net::UdpSocket, sync::RwLock};
 
 use crate::{
-  packet::{AuthHeader, AuthTypeDiscriminants, CtrlPacket, MAX_CTRL_PKT_SIZE},
+  packet::{
+    fill_buf, AuthHeader, AuthTypeDiscriminants, CtrlPacket, State, StateFlags, MAX_CTRL_PKT_SIZE,
+  },
   task::{
     add_jitter,
     timer_ctx::{TimerCtx, TimerCtxTrait},
@@ -17,13 +23,15 @@ use crate::{
 
 // TODO: derive serde, to load from config
 pub struct PeerCfg {
-  addr: SocketAddr,
-  id: u32,
-  des_min_tx_int: u32,
-  req_min_rx_int: u32, // lowest rate of rx supported
-  // req_min_echo_rx_int
-  detect_mult: u8,
-  auth_type: AuthTypeDiscriminants,
+  pub(crate) addr: SocketAddr,
+  pub(crate) id: u32,
+  pub(crate) des_min_tx_int: u32,
+  pub(crate) req_min_rx_int: u32, // lowest rate of rx supported
+  // pub(crate) req_min_echo_rx_int
+  pub(crate) detect_mult: u8,
+  pub(crate) auth_type: AuthTypeDiscriminants,
+  pub(crate) key_id: Option<u8>,
+  pub(crate) key: Arc<Option<Vec<u8>>>,
 }
 impl PeerCfg {
   #[inline]
@@ -34,6 +42,8 @@ impl PeerCfg {
     des_min_tx_int: Duration,
     req_min_rx_int: Duration,
     auth_type: AuthTypeDiscriminants,
+    key_id: Option<u8>,
+    key: Arc<Option<Vec<u8>>>,
   ) -> Self {
     let des_min_tx_int = des_min_tx_int.as_micros() as u32;
     let req_min_rx_int = req_min_rx_int.as_micros() as u32;
@@ -44,14 +54,16 @@ impl PeerCfg {
       des_min_tx_int,
       req_min_rx_int,
       auth_type,
+      key_id,
+      key,
     }
   }
 
   #[inline]
   fn from_pkt(addr: SocketAddr, pkt: &CtrlPacket, auth_header: Option<&AuthHeader>) -> Self {
-    let auth_type = match auth_header {
-      Some(a) => a.get_auth_type_discriminants(),
-      None => AuthTypeDiscriminants::NoneReserved,
+    let (auth_type, key_id) = match auth_header {
+      Some(a) => (a.get_auth_type_discriminants(), Some(a.key_id)),
+      None => (AuthTypeDiscriminants::NoneReserved, None),
     };
     Self {
       addr,
@@ -60,6 +72,8 @@ impl PeerCfg {
       des_min_tx_int: pkt.des_min_tx_int_from_be(),
       req_min_rx_int: pkt.req_min_echo_rx_int_from_be(),
       auth_type,
+      key_id,
+      key: Arc::new(None),
     }
   }
   // fn from_???() {
@@ -90,6 +104,9 @@ impl NotifyBfdSessionDown for () {}
 struct PeerCtrlPktSendTimer {
   local_cfg: Arc<RwLock<PeerCfg>>,
   remote_cfg: Arc<RwLock<Option<PeerCfg>>>,
+  socket: UdpSocket,
+  seq: u32,
+  state_and_flags: Arc<AtomicU8>,
 }
 struct PeerCtrlPktRecvTimer<Notif> {
   local_cfg: Arc<RwLock<PeerCfg>>,
@@ -100,20 +117,37 @@ struct PeerCtrlPktRecvTimer<Notif> {
 struct PeerSession<Notif> {
   local_cfg: Arc<RwLock<PeerCfg>>,
   remote_cfg: Arc<RwLock<Option<PeerCfg>>>,
-  send_timer: TimerCtx<PeerCtrlPktSendTimer>,
+  _send_timer: TimerCtx<PeerCtrlPktSendTimer>,
   recv_timer: Option<TimerCtx<PeerCtrlPktRecvTimer<Notif>>>,
+  key: Arc<Option<Vec<u8>>>,
+  state_and_flags: Arc<AtomicU8>,
 }
 
 #[async_trait::async_trait]
 impl TimerCtxTrait for PeerCtrlPktSendTimer {
   #[inline]
-  async fn callback(&self) {
+  async fn callback(&mut self) {
+    // let local_cfg = self.local_cfg.read().await;
+    // let remote_cfg = self.remote_cfg.read().await;
+
+    let mut buf = [0u8; MAX_CTRL_PKT_SIZE];
+    let len = fill_buf(
+      &mut buf,
+      self.local_cfg.as_ref(),
+      self.remote_cfg.as_ref(),
+      self.seq,
+      StateFlags::from_bits_retain(self.state_and_flags.load(Ordering::Relaxed)),
+    )
+    .await;
+    let _r = self.socket.send(&buf[..len]).await;
+    // TODO: inc seq
+    // self.seq += 1;
     // println!("sending timed ctrl pkt");
   }
   #[inline]
   async fn duration(&self) -> Duration {
-    let remote_cfg = self.remote_cfg.read().await;
     let local_cfg = self.local_cfg.read().await;
+    let remote_cfg = self.remote_cfg.read().await;
 
     // Look at FRR's `bs_final_handler`
     if let Some(remote_cfg) = remote_cfg.as_ref() {
@@ -122,12 +156,11 @@ impl TimerCtxTrait for PeerCtrlPktSendTimer {
           Duration::from_micros(local_cfg.des_min_tx_int as u64),
           local_cfg.detect_mult,
         );
-      } else {
-        return add_jitter(
-          Duration::from_micros(remote_cfg.req_min_rx_int as u64),
-          local_cfg.detect_mult,
-        );
       }
+      return add_jitter(
+        Duration::from_micros(remote_cfg.req_min_rx_int as u64),
+        local_cfg.detect_mult,
+      );
     }
     add_jitter(
       Duration::from_micros(local_cfg.des_min_tx_int as u64),
@@ -138,9 +171,9 @@ impl TimerCtxTrait for PeerCtrlPktSendTimer {
 #[async_trait::async_trait]
 impl<Notif: NotifyBfdSessionDown + Send + Sync> TimerCtxTrait for PeerCtrlPktRecvTimer<Notif> {
   #[inline]
-  async fn callback(&self) {
-    // TODO: send the appropriate ctrlpkt for session down
-    // self.0
+  async fn callback(&mut self) {
+    // setting this to None will make the send timer stop after sending the appropriate down ctrlpkt
+    *self.remote_cfg.write().await = None;
 
     // TODO: send a msg downstream(design a trait; provide an example RPC implementation of the trait)
     // self.1
@@ -176,27 +209,43 @@ pub struct Bfd<Notif> {
 }
 impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
   pub async fn serve(l_sock_addr: SocketAddr, peers: Vec<PeerCfg>, notify_service: Arc<Notif>) {
-    let timers = peers
-      .into_iter()
-      .map(|p| {
-        let addr = p.addr.ip();
-        let pcfg = Arc::new(RwLock::new(p));
-        let rpcfg = Arc::new(RwLock::new(None));
-        (
-          addr,
-          PeerSession {
+    let timers = futures::future::join_all(peers.into_iter().map(|p| async {
+      let addr = p.addr.ip();
+      let key = p.key.clone();
+      let socket = UdpSocket::bind(SocketAddr::new(l_sock_addr.ip(), 0))
+        .await
+        .unwrap();
+      let state_and_flags = Arc::new(AtomicU8::new(
+        StateFlags::new(State::Down, StateFlags::F_UNSET).bits(),
+      ));
+      socket.connect(p.addr).await.unwrap();
+      let r4 = setsockopt(&socket, nix::sys::socket::sockopt::Ipv4Ttl, &255);
+      let r6 = setsockopt(&socket, nix::sys::socket::sockopt::Ipv6Ttl, &255);
+      tracing::trace!("setting TTL results: ipv4 {:?} - ipv6 {:?}", r4, r6);
+      let pcfg = Arc::new(RwLock::new(p));
+      let rpcfg = Arc::new(RwLock::new(None));
+
+      (
+        addr,
+        PeerSession {
+          local_cfg: pcfg.clone(),
+          remote_cfg: rpcfg.clone(),
+          _send_timer: TimerCtx::new(PeerCtrlPktSendTimer {
             local_cfg: pcfg.clone(),
             remote_cfg: rpcfg.clone(),
-            send_timer: TimerCtx::new(PeerCtrlPktSendTimer {
-              local_cfg: pcfg.clone(),
-              remote_cfg: rpcfg.clone(),
-            }),
-            recv_timer: None,
-          },
-        )
-      })
-      .collect();
-    // let sock = UdpSocket::bind(l_sock_addr).await?;
+            socket,
+            seq: 0,
+            state_and_flags: state_and_flags.clone(),
+          }),
+          recv_timer: None,
+          key,
+          state_and_flags,
+        },
+      )
+    }))
+    .await
+    .into_iter()
+    .collect();
 
     Self {
       l_sock_addr,
@@ -237,7 +286,7 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
         len,
         &buf,
         AuthTypeDiscriminants::from_repr(2).unwrap(),
-        &b"some_random_key".to_vec(),
+        sess.key.as_ref().as_ref(),
       ) {
         Some(v) => v,
         None => continue,
@@ -258,7 +307,12 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
             }));
           }
         }
+        sess
+          .state_and_flags
+          .store(pkt.state_and_flags.bits(), Ordering::Release);
       }
+      // TODO: handle poll flag
+      // TODO: handle final flag
 
       // println!("{:?}", pkt);
       // let auth_head = pkt.get_auth_header(&buf).unwrap();

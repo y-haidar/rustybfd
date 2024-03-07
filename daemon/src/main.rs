@@ -17,9 +17,11 @@ async fn main() {
     "172.30.135.1:3784".parse().unwrap(),
     1,
     3,
-    Duration::from_millis(1000),
-    Duration::from_millis(1000),
+    Duration::from_millis(600),
+    Duration::from_millis(600),
     AuthTypeDiscriminants::Md5,
+    Some(1),
+    Arc::new(Some(b"some_random_key".to_vec())),
   )];
   Bfd::serve("172.30.135.50:3784".parse().unwrap(), peers, Arc::new(())).await;
 }

@@ -5,6 +5,9 @@ use bytemuck::{Pod, Zeroable};
 use derivative::Derivative;
 use md5::Digest;
 use strum_macros::{EnumDiscriminants, FromRepr};
+use tokio::sync::RwLock;
+
+use crate::bfd::test_impl::PeerCfg;
 
 fn fmt_u32_from_be(f: &u32, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
   let _ = fmt.write_str(&u32::from_be(*f).to_string());
@@ -49,11 +52,20 @@ pub enum Diagnostic {
 #[repr(C)]
 pub struct VerDiag(u8);
 impl VerDiag {
+  pub const fn new() -> Self {
+    Self(0b001_00000u8)
+  }
   pub fn get_version(&self) -> u8 {
     self.0 >> 5
   }
-  pub fn get_diagnostic(&self) -> Option<Diagnostic> {
-    Diagnostic::from_repr(self.0 & 0b00011111u8)
+  pub fn set_version(&mut self, version: u8) {
+    self.0 &= (version << 5) | 0b000_11111u8;
+  }
+  pub fn get_diagnostic(&self) -> Diagnostic {
+    Diagnostic::from_repr(self.0 & 0b000_11111u8).unwrap()
+  }
+  pub fn set_diagnostic(&mut self, diagnostic: Diagnostic) {
+    self.0 &= diagnostic as u8 | 0b111_00000u8;
   }
 }
 impl Default for VerDiag {
@@ -63,6 +75,7 @@ impl Default for VerDiag {
 }
 
 #[derive(Default, Debug, PartialEq, FromRepr)]
+#[repr(u8)]
 pub enum State {
   #[default]
   AdminDown,
@@ -83,6 +96,8 @@ bitflags! {
       /// This bit is reserved for future point-to-multipoint extensions to
       /// BFD. It MUST be zero on both transmit and receipt.
       const F_MULTIPOINT = 0b00000001;
+
+      const F_UNSET = 0;
   }
 }
 
@@ -90,8 +105,14 @@ unsafe impl Zeroable for StateFlags {}
 unsafe impl Pod for StateFlags {}
 
 impl StateFlags {
+  pub fn new(state: State, flags: StateFlags) -> Self {
+    Self::from_bits_retain(((state as u8) << 6) | flags.bits())
+  }
   pub fn get_state(&self) -> State {
-    State::from_repr((self.bits() >> 6) as usize).unwrap()
+    State::from_repr(self.bits() >> 6).unwrap()
+  }
+  pub fn set_state(&mut self, state: State) {
+    self.0 .0 &= ((state as u8) << 6) | 0b00_111111u8;
   }
 }
 
@@ -283,11 +304,94 @@ impl std::fmt::Debug for CtrlPacket {
   }
 }
 
+pub async fn fill_buf(
+  buf: &mut [u8; MAX_CTRL_PKT_SIZE],
+  local_cfg: &RwLock<PeerCfg>,
+  remote_cfg: &RwLock<Option<PeerCfg>>,
+  seq: u32,
+  state_and_flags: StateFlags,
+) -> usize {
+  let local_cfg = local_cfg.read().await;
+  let remote_cfg = remote_cfg.read().await;
+  let key = local_cfg.key.as_ref().as_ref();
+  let state = state_and_flags.get_state();
+  let should_include_final = match state_and_flags.contains(StateFlags::F_POLL) {
+    true => StateFlags::F_FINAL,
+    false => StateFlags::F_UNSET,
+  };
+
+  match local_cfg.auth_type {
+    AuthTypeDiscriminants::NoneReserved => todo!(),
+    AuthTypeDiscriminants::Simple => todo!(),
+    AuthTypeDiscriminants::Md5 | AuthTypeDiscriminants::MeticulousMd5 => {
+      let (rcv_id, state) = match remote_cfg.as_ref() {
+        Some(remote_cfg) => (remote_cfg.id, state),
+        None => (0, crate::packet::State::Down),
+      };
+      let pkt = CtrlPacket {
+        ver_and_diag: VerDiag::new(),
+        state_and_flags: StateFlags::new(state, StateFlags::F_AUTH_PRESENT | should_include_final),
+        detect_mult: local_cfg.detect_mult,
+        length: MD5_CTRL_PKT_SIZE as u8,
+        snd_id: local_cfg.id.to_be(),
+        rcv_id: rcv_id.to_be(),
+        des_min_tx_int: local_cfg.des_min_tx_int.to_be(),
+        req_min_rx_int: local_cfg.req_min_rx_int.to_be(),
+        req_min_echo_rx_int: 0,
+      };
+      let auth_header = AuthHeader {
+        typ: local_cfg.auth_type as u8,
+        lenth: 24,
+        key_id: local_cfg.key_id.unwrap_or_default(),
+        __reserved_part_of_pass: 0,
+      };
+
+      buf[..size_of::<CtrlPacket>()].copy_from_slice(bytemuck::bytes_of(&pkt));
+      buf[size_of::<CtrlPacket>()..size_of::<CtrlPacket>() + size_of::<AuthHeader>()]
+        .copy_from_slice(bytemuck::bytes_of(&auth_header));
+      let key = match key {
+        Some(key) => key,
+        None => {
+          tracing::trace!("whaT? why no key :(");
+          return 0;
+        }
+      };
+      let digest = md5::Md5::new()
+        .chain_update(bytemuck::bytes_of(&pkt))
+        .chain_update(bytemuck::bytes_of(&auth_header))
+        .chain_update(bytemuck::bytes_of(&seq.to_be()));
+      // TODO: test if key have to be converted to BE; I think no
+      let digest = match key.len() > 16 {
+        true => {
+          tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", key.len());
+          // This does not work
+          let pass = md5::Md5::new().chain_update(&key).finalize();
+          digest
+            // .chain_update(&pass.as_slice()[pass.len() - 16..])
+            .chain_update(&pass)
+            .finalize()
+        }
+        false => {
+          let padding: Vec<u8> = (0..16 - key.len()).map(|_| 0u8).collect();
+          digest.chain_update(key).chain_update(&padding).finalize()
+        }
+      };
+      buf[size_of::<CtrlPacket>() + size_of::<AuthHeader>()
+        ..size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<u32>()]
+        .copy_from_slice(bytemuck::bytes_of(&seq.to_be()));
+      buf[size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<u32>()..MD5_CTRL_PKT_SIZE]
+        .copy_from_slice(digest.as_slice());
+      MD5_CTRL_PKT_SIZE
+    }
+    AuthTypeDiscriminants::Sha1 | AuthTypeDiscriminants::MeticulousSha1 => todo!(),
+  }
+}
+
 pub fn check<'a>(
   len: usize,
   data: &'a [u8],
   configured_auth_type: AuthTypeDiscriminants,
-  pass: &Vec<u8>,
+  key: Option<&Vec<u8>>,
 ) -> Option<(&'a CtrlPacket, Option<&'a AuthHeader>, Option<AuthType<'a>>)> {
   let pkt = match CtrlPacket::read_bytes(len, data) {
     Some(v) => v,
@@ -316,21 +420,25 @@ pub fn check<'a>(
       if auth_header.lenth != (size_of::<AuthHeader>() + size_of::<AuthMd5>()) as u8 {
         return None;
       }
+      let key = match key {
+        Some(key) => key,
+        None => return None,
+      };
 
       let digest = md5::Md5::new().chain_update(&data[..MD5_CTRL_PKT_SIZE - 16]);
-      let digest = match pass.len() > 16 {
+      let digest = match key.len() > 16 {
         true => {
-          tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", pass.len());
+          tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", key.len());
           // This does not work
-          let pass = md5::Md5::new().chain_update(&pass).finalize();
+          let pass = md5::Md5::new().chain_update(&key).finalize();
           digest
             // .chain_update(&pass.as_slice()[pass.len() - 16..])
             .chain_update(&pass)
             .finalize()
         }
         false => {
-          let padding: Vec<u8> = (0..16 - pass.len()).map(|_| 0u8).collect();
-          digest.chain_update(pass).chain_update(&padding).finalize()
+          let padding: Vec<u8> = (0..16 - key.len()).map(|_| 0u8).collect();
+          digest.chain_update(key).chain_update(&padding).finalize()
         }
       };
       if digest.as_slice() != auth.digest {

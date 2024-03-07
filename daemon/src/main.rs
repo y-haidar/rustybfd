@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use rustybfd::{
   bfd::test_impl::{Bfd, PeerCfg},
@@ -17,8 +17,8 @@ async fn main() {
     "172.30.135.1:3784".parse().unwrap(),
     1,
     3,
-    600,
-    600,
+    Duration::from_millis(1000),
+    Duration::from_millis(1000),
     AuthTypeDiscriminants::Md5,
   )];
   Bfd::serve("172.30.135.50:3784".parse().unwrap(), peers, Arc::new(())).await;

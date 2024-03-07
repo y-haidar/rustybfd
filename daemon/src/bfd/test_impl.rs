@@ -1,4 +1,3 @@
-use nix::sys::socket::setsockopt;
 use std::{
   collections::HashMap,
   io,
@@ -6,7 +5,7 @@ use std::{
   sync::Arc,
   time::Duration,
 };
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, sync::RwLock};
 
 use crate::{
   packet::{AuthHeader, AuthTypeDiscriminants, CtrlPacket, MAX_CTRL_PKT_SIZE},
@@ -15,8 +14,6 @@ use crate::{
     timer_ctx::{TimerCtx, TimerCtxTrait},
   },
 };
-
-use super::auth::check;
 
 // TODO: derive serde, to load from config
 pub struct PeerCfg {
@@ -34,10 +31,12 @@ impl PeerCfg {
     addr: SocketAddr,
     id: u32,
     detect_mult: u8,
-    des_min_tx_int: u32,
-    req_min_rx_int: u32,
+    des_min_tx_int: Duration,
+    req_min_rx_int: Duration,
     auth_type: AuthTypeDiscriminants,
   ) -> Self {
+    let des_min_tx_int = des_min_tx_int.as_micros() as u32;
+    let req_min_rx_int = req_min_rx_int.as_micros() as u32;
     Self {
       addr,
       id,
@@ -49,16 +48,18 @@ impl PeerCfg {
   }
 
   #[inline]
-  fn from_pkt(addr: SocketAddr, pkt: &CtrlPacket, auth_header: &AuthHeader) -> Self {
+  fn from_pkt(addr: SocketAddr, pkt: &CtrlPacket, auth_header: Option<&AuthHeader>) -> Self {
+    let auth_type = match auth_header {
+      Some(a) => a.get_auth_type_discriminants(),
+      None => AuthTypeDiscriminants::NoneReserved,
+    };
     Self {
       addr,
       id: pkt.snd_id_from_be(),
       detect_mult: pkt.detect_mult,
       des_min_tx_int: pkt.des_min_tx_int_from_be(),
       req_min_rx_int: pkt.req_min_echo_rx_int_from_be(),
-      // TODO: Check if auth_type can be diffrent between local and remote
-      // TODO: check if valid auth_type
-      auth_type: auth_header.get_auth_type_discriminants(),
+      auth_type,
     }
   }
   // fn from_???() {
@@ -87,18 +88,18 @@ impl NotifyBfdSessionDown for () {}
 // local config or remote config, a whole new struct is made
 // TODO: maybe look into improving this later
 struct PeerCtrlPktSendTimer {
-  local_cfg: Arc<PeerCfg>,
-  remote_cfg: Arc<Option<PeerCfg>>,
+  local_cfg: Arc<RwLock<PeerCfg>>,
+  remote_cfg: Arc<RwLock<Option<PeerCfg>>>,
 }
 struct PeerCtrlPktRecvTimer<Notif> {
-  local_cfg: Arc<PeerCfg>,
-  remote_cfg: Arc<Option<PeerCfg>>,
-  notify_service: Arc<Notif>,
+  local_cfg: Arc<RwLock<PeerCfg>>,
+  remote_cfg: Arc<RwLock<Option<PeerCfg>>>,
+  _notify_service: Arc<Notif>,
 }
 
 struct PeerSession<Notif> {
-  local_cfg: Arc<PeerCfg>,
-  remote_cfg: Arc<Option<PeerCfg>>,
+  local_cfg: Arc<RwLock<PeerCfg>>,
+  remote_cfg: Arc<RwLock<Option<PeerCfg>>>,
   send_timer: TimerCtx<PeerCtrlPktSendTimer>,
   recv_timer: Option<TimerCtx<PeerCtrlPktRecvTimer<Notif>>>,
 }
@@ -107,27 +108,30 @@ struct PeerSession<Notif> {
 impl TimerCtxTrait for PeerCtrlPktSendTimer {
   #[inline]
   async fn callback(&self) {
-    // todo!()
+    // println!("sending timed ctrl pkt");
   }
   #[inline]
-  fn duration(&self) -> Duration {
+  async fn duration(&self) -> Duration {
+    let remote_cfg = self.remote_cfg.read().await;
+    let local_cfg = self.local_cfg.read().await;
+
     // Look at FRR's `bs_final_handler`
-    if let Some(remote_cfg) = self.remote_cfg.as_ref() {
-      if self.local_cfg.des_min_tx_int > remote_cfg.req_min_rx_int {
+    if let Some(remote_cfg) = remote_cfg.as_ref() {
+      if local_cfg.des_min_tx_int > remote_cfg.req_min_rx_int {
         return add_jitter(
-          Duration::from_micros(self.local_cfg.des_min_tx_int as u64),
-          self.local_cfg.detect_mult,
+          Duration::from_micros(local_cfg.des_min_tx_int as u64),
+          local_cfg.detect_mult,
         );
       } else {
         return add_jitter(
           Duration::from_micros(remote_cfg.req_min_rx_int as u64),
-          self.local_cfg.detect_mult,
+          local_cfg.detect_mult,
         );
       }
     }
     add_jitter(
-      Duration::from_micros(self.local_cfg.des_min_tx_int as u64),
-      self.local_cfg.detect_mult,
+      Duration::from_micros(local_cfg.des_min_tx_int as u64),
+      local_cfg.detect_mult,
     )
   }
 }
@@ -140,23 +144,26 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync> TimerCtxTrait for PeerCtrlPktRec
 
     // TODO: send a msg downstream(design a trait; provide an example RPC implementation of the trait)
     // self.1
+    println!("Recv timer, timedout");
   }
   #[inline]
   /// the timer duration is going to be `jittered(detect_mult * des_min_tx_int)`
-  fn duration(&self) -> Duration {
+  async fn duration(&self) -> Duration {
+    let remote_cfg = self.remote_cfg.read().await;
+    let local_cfg = self.local_cfg.read().await;
+
     // look at FRR's `bfd_recv_cb`
-    if let Some(remote_cfg) = self.remote_cfg.as_ref() {
-      if self.local_cfg.req_min_rx_int > remote_cfg.des_min_tx_int {
+    if let Some(remote_cfg) = remote_cfg.as_ref() {
+      if local_cfg.req_min_rx_int > remote_cfg.des_min_tx_int {
         return Duration::from_micros(
-          remote_cfg.detect_mult as u64 * self.local_cfg.req_min_rx_int as u64,
-        );
-      } else {
-        return Duration::from_micros(
-          remote_cfg.detect_mult as u64 * remote_cfg.des_min_tx_int as u64,
+          remote_cfg.detect_mult as u64 * local_cfg.req_min_rx_int as u64,
         );
       }
+      return Duration::from_micros(
+        remote_cfg.detect_mult as u64 * remote_cfg.des_min_tx_int as u64,
+      );
     }
-    todo!()
+    unreachable!()
   }
 }
 
@@ -168,21 +175,21 @@ pub struct Bfd<Notif> {
   timers: HashMap<IpAddr, PeerSession<Notif>>,
 }
 impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
-  pub async fn serve(l_sock_addr: SocketAddr, peers: Vec<PeerCfg>, _notify_service: Arc<Notif>) {
+  pub async fn serve(l_sock_addr: SocketAddr, peers: Vec<PeerCfg>, notify_service: Arc<Notif>) {
     let timers = peers
       .into_iter()
       .map(|p| {
         let addr = p.addr.ip();
-        let p = Arc::new(p);
-        let rp = Arc::new(None);
+        let pcfg = Arc::new(RwLock::new(p));
+        let rpcfg = Arc::new(RwLock::new(None));
         (
           addr,
           PeerSession {
-            local_cfg: p.clone(),
-            remote_cfg: rp.clone(),
+            local_cfg: pcfg.clone(),
+            remote_cfg: rpcfg.clone(),
             send_timer: TimerCtx::new(PeerCtrlPktSendTimer {
-              local_cfg: p.clone(),
-              remote_cfg: rp.clone(),
+              local_cfg: pcfg.clone(),
+              remote_cfg: rpcfg.clone(),
             }),
             recv_timer: None,
           },
@@ -195,12 +202,12 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
       l_sock_addr,
       timers,
     }
-    ._serve()
+    ._serve(notify_service)
     .await
     .unwrap();
   }
 
-  async fn _serve(self) -> io::Result<()> {
+  async fn _serve(mut self, notify_service: Arc<Notif>) -> io::Result<()> {
     let sock = UdpSocket::bind(self.l_sock_addr).await?;
     // TODO: add mhop support
     // TODO: check if this ttl value is correct for shop
@@ -218,20 +225,39 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
         continue;
       }
 
-      if !self.timers.contains_key(&addr.ip()) {
-        tracing::trace!("received from unknown address: {addr}");
-        continue;
-      }
+      let sess = match self.timers.get_mut(&addr.ip()) {
+        Some(s) => s,
+        None => {
+          tracing::trace!("received from unknown address: {addr}");
+          continue;
+        }
+      };
 
-      let pkt = CtrlPacket::read_bytes(len, &buf).unwrap();
-      if !check(
+      let (pkt, auth_header, _auth_type) = match crate::packet::check(
         len,
-        pkt,
         &buf,
         AuthTypeDiscriminants::from_repr(2).unwrap(),
         &b"some_random_key".to_vec(),
       ) {
-        continue;
+        Some(v) => v,
+        None => continue,
+      };
+
+      {
+        let mut rpcfg = sess.remote_cfg.write().await;
+        *rpcfg = Some(PeerCfg::from_pkt(addr, pkt, auth_header));
+        match &sess.recv_timer {
+          Some(timer) => {
+            let _ = timer.update_timer().await;
+          }
+          None => {
+            sess.recv_timer = Some(TimerCtx::new(PeerCtrlPktRecvTimer {
+              local_cfg: sess.local_cfg.clone(),
+              remote_cfg: sess.remote_cfg.clone(),
+              _notify_service: notify_service.clone(),
+            }));
+          }
+        }
       }
 
       // println!("{:?}", pkt);

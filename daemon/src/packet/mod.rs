@@ -3,6 +3,7 @@ use std::mem::size_of;
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use derivative::Derivative;
+use md5::Digest;
 use strum_macros::{EnumDiscriminants, FromRepr};
 
 fn fmt_u32_from_be(f: &u32, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
@@ -16,6 +17,8 @@ fn fmt_u8_slice_to_hex(f: &[u8], fmt: &mut std::fmt::Formatter) -> Result<(), st
 
 pub const MAX_CTRL_PKT_SIZE: usize =
   size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<AuthSha1>();
+pub const MD5_CTRL_PKT_SIZE: usize =
+  size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<AuthMd5>();
 
 #[derive(Default, Debug, PartialEq, FromRepr)]
 #[repr(u8)]
@@ -126,8 +129,14 @@ impl<'a> CtrlPacket {
   pub fn req_min_echo_rx_int_from_be(&self) -> u32 {
     u32::from_be(self.req_min_echo_rx_int)
   }
-  pub fn get_auth_header(&'a self, data: &'a [u8]) -> &'a AuthHeader {
-    bytemuck::from_bytes(&data[size_of::<Self>()..size_of::<AuthHeader>() + size_of::<Self>()])
+  pub fn get_auth_header(&'a self, data: &'a [u8]) -> Option<&'a AuthHeader> {
+    if self.state_and_flags.contains(StateFlags::F_AUTH_PRESENT) {
+      Some(bytemuck::from_bytes(
+        &data[size_of::<Self>()..size_of::<AuthHeader>() + size_of::<Self>()],
+      ))
+    } else {
+      None
+    }
   }
   pub fn read_bytes(len: usize, data: &'a [u8]) -> Option<&'a Self> {
     if len >= std::mem::size_of::<CtrlPacket>() {
@@ -274,6 +283,67 @@ impl std::fmt::Debug for CtrlPacket {
   }
 }
 
+pub fn check<'a>(
+  len: usize,
+  data: &'a [u8],
+  configured_auth_type: AuthTypeDiscriminants,
+  pass: &Vec<u8>,
+) -> Option<(&'a CtrlPacket, Option<&'a AuthHeader>, Option<AuthType<'a>>)> {
+  let pkt = match CtrlPacket::read_bytes(len, data) {
+    Some(v) => v,
+    None => return None,
+  };
+
+  let auth_header = match (
+    pkt.get_auth_header(data),
+    configured_auth_type == AuthTypeDiscriminants::NoneReserved,
+  ) {
+    (None, true) => return Some((pkt, None, None)),
+    (None, false) => return None,
+    (Some(_), true) => return None,
+    (Some(v), false) => v,
+  };
+
+  if auth_header.typ != configured_auth_type as u8 {
+    return None;
+  }
+  let auth_type = auth_header.get_auth_type(data);
+  // TODO: check seq number
+  match auth_type {
+    AuthType::NoneReserved(_) => todo!(),
+    AuthType::Simple(_) => todo!(),
+    AuthType::Md5(auth) => {
+      if auth_header.lenth != (size_of::<AuthHeader>() + size_of::<AuthMd5>()) as u8 {
+        return None;
+      }
+
+      let digest = md5::Md5::new().chain_update(&data[..MD5_CTRL_PKT_SIZE - 16]);
+      let digest = match pass.len() > 16 {
+        true => {
+          tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", pass.len());
+          // This does not work
+          let pass = md5::Md5::new().chain_update(&pass).finalize();
+          digest
+            // .chain_update(&pass.as_slice()[pass.len() - 16..])
+            .chain_update(&pass)
+            .finalize()
+        }
+        false => {
+          let padding: Vec<u8> = (0..16 - pass.len()).map(|_| 0u8).collect();
+          digest.chain_update(pass).chain_update(&padding).finalize()
+        }
+      };
+      if digest.as_slice() != auth.digest {
+        return None;
+      }
+    }
+    AuthType::MeticulousMd5(_) => todo!(),
+    AuthType::Sha1(_) => todo!(),
+    AuthType::MeticulousSha1(_) => todo!(),
+  }
+  return Some((pkt, Some(auth_header), Some(auth_type)));
+}
+
 #[cfg(test)]
 mod test {
   use super::*;
@@ -313,7 +383,10 @@ mod test {
     )
     "###);
 
-    let auth_head = pkt.unwrap().get_auth_header(&sample_pkt_with_md5_auth);
+    let auth_head = pkt
+      .unwrap()
+      .get_auth_header(&sample_pkt_with_md5_auth)
+      .unwrap();
     insta::assert_debug_snapshot!(auth_head, @r###"
     Some(
         AuthHeader {

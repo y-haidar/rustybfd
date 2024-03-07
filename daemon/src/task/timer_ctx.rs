@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 #[async_trait::async_trait]
 pub trait TimerCtxTrait {
   async fn callback(&self);
-  fn duration(&self) -> Duration;
+  async fn duration(&self) -> Duration;
 }
 
 pub struct TimerCtx<Ctx> {
@@ -17,7 +17,7 @@ impl<Ctx: TimerCtxTrait + Send + Sync + 'static> TimerCtx<Ctx> {
     let (tx, mut rx) = mpsc::channel(1024);
 
     tokio::spawn(async move {
-      let duration = ctx.duration();
+      let mut duration = ctx.duration().await;
       let mut interval = tokio::time::interval(duration);
       _ = interval.tick().await;
       loop {
@@ -34,13 +34,13 @@ impl<Ctx: TimerCtxTrait + Send + Sync + 'static> TimerCtx<Ctx> {
                 interval = tokio::time::interval(duration);
                 _ = interval.tick().await;
               }
-              // Some(TimerCtxMessage::UpdateAndRefresh(new)) => {
-              //   ctx = new;
-              //   duration = ctx.duration();
+              Some(TimerCtxMessage::UpdateAndRefresh) => {
+                // ctx = new;
+                duration = ctx.duration().await;
 
-              //   interval = tokio::time::interval(duration);
-              //   _ = interval.tick().await;
-              // }
+                interval = tokio::time::interval(duration);
+                _ = interval.tick().await;
+              }
               None => break,
             }
           }
@@ -56,10 +56,18 @@ impl<Ctx: TimerCtxTrait + Send + Sync + 'static> TimerCtx<Ctx> {
   pub async fn refresh(&self) -> Result<(), ()> {
     self.tx.send(TimerCtxMessage::Refresh).await.map_err(|_| ())
   }
+  pub async fn update_timer(&self) -> Result<(), ()> {
+    self
+      .tx
+      .send(TimerCtxMessage::UpdateAndRefresh)
+      .await
+      .map_err(|_| ())
+  }
 }
 
 #[derive(Debug)]
 enum TimerCtxMessage {
   Refresh,
+  UpdateAndRefresh,
   // UpdateAndRefresh(Ctx),
 }

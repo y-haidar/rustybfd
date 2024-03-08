@@ -309,15 +309,18 @@ pub async fn fill_buf(
   local_cfg: &RwLock<PeerCfg>,
   remote_cfg: &RwLock<Option<PeerCfg>>,
   seq: u32,
-  state_and_flags: StateFlags,
+  remote_state_and_flags: StateFlags,
 ) -> usize {
   let local_cfg = local_cfg.read().await;
   let remote_cfg = remote_cfg.read().await;
   let key = local_cfg.key.as_ref().as_ref();
-  let state = state_and_flags.get_state();
-  let should_include_final = match state_and_flags.contains(StateFlags::F_POLL) {
+  let should_include_final = match remote_state_and_flags.contains(StateFlags::F_POLL) {
     true => StateFlags::F_FINAL,
     false => StateFlags::F_UNSET,
+  };
+  let state = match remote_state_and_flags.get_state() {
+    State::AdminDown | State::Down => State::Down,
+    State::Init | State::Up => State::Up,
   };
 
   match local_cfg.auth_type {
@@ -326,7 +329,7 @@ pub async fn fill_buf(
     AuthTypeDiscriminants::Md5 | AuthTypeDiscriminants::MeticulousMd5 => {
       let (rcv_id, state) = match remote_cfg.as_ref() {
         Some(remote_cfg) => (remote_cfg.id, state),
-        None => (0, crate::packet::State::Down),
+        None => (0, State::Down),
       };
       let pkt = CtrlPacket {
         ver_and_diag: VerDiag::new(),
@@ -360,7 +363,6 @@ pub async fn fill_buf(
         .chain_update(bytemuck::bytes_of(&pkt))
         .chain_update(bytemuck::bytes_of(&auth_header))
         .chain_update(bytemuck::bytes_of(&seq.to_be()));
-      // TODO: test if key have to be converted to BE; I think no
       let digest = match key.len() > 16 {
         true => {
           tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", key.len());
@@ -397,6 +399,7 @@ pub fn check<'a>(
     Some(v) => v,
     None => return None,
   };
+  // TODO: check if configured id is not the same as rcv_id
 
   let auth_header = match (
     pkt.get_auth_header(data),
@@ -449,7 +452,7 @@ pub fn check<'a>(
     AuthType::Sha1(_) => todo!(),
     AuthType::MeticulousSha1(_) => todo!(),
   }
-  return Some((pkt, Some(auth_header), Some(auth_type)));
+  Some((pkt, Some(auth_header), Some(auth_type)))
 }
 
 #[cfg(test)]

@@ -97,6 +97,7 @@ pub trait NotifyBfdSessionDown {
   // TODO:
 }
 impl NotifyBfdSessionDown for () {}
+// TODO: Trait for Config hotreload
 
 // the way this is designed, when an update to config from either
 // local config or remote config, a whole new struct is made
@@ -106,7 +107,7 @@ struct PeerCtrlPktSendTimer {
   remote_cfg: Arc<RwLock<Option<PeerCfg>>>,
   socket: UdpSocket,
   seq: u32,
-  state_and_flags: Arc<AtomicU8>,
+  remote_state_and_flags: Arc<AtomicU8>,
 }
 struct PeerCtrlPktRecvTimer<Notif> {
   local_cfg: Arc<RwLock<PeerCfg>>,
@@ -120,7 +121,7 @@ struct PeerSession<Notif> {
   _send_timer: TimerCtx<PeerCtrlPktSendTimer>,
   recv_timer: Option<TimerCtx<PeerCtrlPktRecvTimer<Notif>>>,
   key: Arc<Option<Vec<u8>>>,
-  state_and_flags: Arc<AtomicU8>,
+  remote_state_and_flags: Arc<AtomicU8>,
 }
 
 #[async_trait::async_trait]
@@ -136,7 +137,7 @@ impl TimerCtxTrait for PeerCtrlPktSendTimer {
       self.local_cfg.as_ref(),
       self.remote_cfg.as_ref(),
       self.seq,
-      StateFlags::from_bits_retain(self.state_and_flags.load(Ordering::Relaxed)),
+      StateFlags::from_bits_retain(self.remote_state_and_flags.load(Ordering::Relaxed)),
     )
     .await;
     let _r = self.socket.send(&buf[..len]).await;
@@ -151,16 +152,12 @@ impl TimerCtxTrait for PeerCtrlPktSendTimer {
 
     // Look at FRR's `bs_final_handler`
     if let Some(remote_cfg) = remote_cfg.as_ref() {
-      if local_cfg.des_min_tx_int > remote_cfg.req_min_rx_int {
+      if local_cfg.des_min_tx_int < remote_cfg.req_min_rx_int {
         return add_jitter(
-          Duration::from_micros(local_cfg.des_min_tx_int as u64),
+          Duration::from_micros(remote_cfg.req_min_rx_int as u64),
           local_cfg.detect_mult,
         );
       }
-      return add_jitter(
-        Duration::from_micros(remote_cfg.req_min_rx_int as u64),
-        local_cfg.detect_mult,
-      );
     }
     add_jitter(
       Duration::from_micros(local_cfg.des_min_tx_int as u64),
@@ -235,11 +232,11 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
             remote_cfg: rpcfg.clone(),
             socket,
             seq: 0,
-            state_and_flags: state_and_flags.clone(),
+            remote_state_and_flags: state_and_flags.clone(),
           }),
           recv_timer: None,
           key,
-          state_and_flags,
+          remote_state_and_flags: state_and_flags,
         },
       )
     }))
@@ -308,7 +305,7 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
           }
         }
         sess
-          .state_and_flags
+          .remote_state_and_flags
           .store(pkt.state_and_flags.bits(), Ordering::Release);
       }
       // TODO: handle poll flag

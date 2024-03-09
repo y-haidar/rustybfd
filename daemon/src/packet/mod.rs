@@ -119,12 +119,16 @@ impl StateFlags {
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
 #[repr(C)]
 pub struct CtrlPacket {
-  pub ver_and_diag: VerDiag,       /* Version and diagnostic */
-  pub state_and_flags: StateFlags, /* State and flags */
+  /// Version and diagnostic
+  pub ver_and_diag: VerDiag,
+  pub state_and_flags: StateFlags,
   pub detect_mult: u8,
-  pub length: u8,  /* Whole packet length */
-  pub snd_id: u32, /* Sender ID, aka 'my discriminator' */
-  pub rcv_id: u32, /* Receiver ID, aka 'your discriminator' */
+  /// Whole packet length
+  pub length: u8,
+  /// Sender ID, aka 'my discriminator
+  pub snd_id: u32,
+  /// Receiver ID, aka 'your discriminator
+  pub rcv_id: u32,
   pub des_min_tx_int: u32,
   pub req_min_rx_int: u32,
   pub req_min_echo_rx_int: u32,
@@ -172,7 +176,7 @@ impl<'a> CtrlPacket {
 #[repr(C)]
 pub struct AuthHeader {
   pub typ: u8,
-  pub lenth: u8,
+  pub length: u8,
   pub key_id: u8,
   pub __reserved_part_of_pass: u8,
 }
@@ -184,12 +188,12 @@ impl<'a> AuthHeader {
     match self.get_auth_type_discriminants() {
       AuthTypeDiscriminants::NoneReserved => AuthType::NoneReserved(self.typ),
       AuthTypeDiscriminants::Simple => {
-        AuthType::Simple(if self.lenth > size_of::<AuthSimple>() as u8 {
+        AuthType::Simple(if self.length > size_of::<AuthSimple>() as u8 {
           panic!("return error instead")
         } else {
           let mut pass = [0u8; 16];
-          pass[..self.lenth as usize].copy_from_slice(
-            &auth_data[size_of::<Self>() - 1..self.lenth as usize + size_of::<Self>() - 1],
+          pass[..self.length as usize].copy_from_slice(
+            &auth_data[size_of::<Self>() - 1..self.length as usize + size_of::<Self>() - 1],
           );
           AuthSimple { pass }
         })
@@ -286,8 +290,6 @@ impl std::fmt::Debug for StateFlags {
 }
 impl std::fmt::Debug for CtrlPacket {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    // let auth_type = self.auth_type();
-
     f.debug_struct("CtrlPacket")
       .field("ver_and_diag", &self.ver_and_diag)
       .field("state_and_flags", &self.state_and_flags)
@@ -298,8 +300,6 @@ impl std::fmt::Debug for CtrlPacket {
       .field("des_min_tx_int", &self.des_min_tx_int_from_be())
       .field("req_min_rx_int", &self.req_min_rx_int_from_be())
       .field("req_min_echo_rx_int", &self.req_min_echo_rx_int_from_be())
-      // .field("auth_header", &self.auth_header)
-      // .field("auth_data", &auth_type)
       .finish()
   }
 }
@@ -322,36 +322,30 @@ pub async fn fill_buf(
     State::AdminDown | State::Down => State::Down,
     State::Init | State::Up => State::Up,
   };
+  let (rcv_id, state) = match remote_cfg.as_ref() {
+    Some(remote_cfg) => (remote_cfg.id, state),
+    None => (0, State::Down),
+  };
+  buf[0] = VerDiag::new().0;
+  buf[1] = StateFlags::new(state, StateFlags::F_AUTH_PRESENT | should_include_final).bits();
+  buf[2] = local_cfg.detect_mult;
+  buf[3] = MD5_CTRL_PKT_SIZE as u8;
+  buf[4..8].copy_from_slice(bytemuck::bytes_of(&local_cfg.id.to_be()));
+  buf[8..12].copy_from_slice(bytemuck::bytes_of(&rcv_id.to_be()));
+  buf[12..16].copy_from_slice(bytemuck::bytes_of(&local_cfg.des_min_tx_int.to_be()));
+  buf[16..20].copy_from_slice(bytemuck::bytes_of(&local_cfg.req_min_rx_int.to_be()));
+  buf[20..24].copy_from_slice(bytemuck::bytes_of(&0u32));
 
   match local_cfg.auth_type {
     AuthTypeDiscriminants::NoneReserved => todo!(),
     AuthTypeDiscriminants::Simple => todo!(),
     AuthTypeDiscriminants::Md5 | AuthTypeDiscriminants::MeticulousMd5 => {
-      let (rcv_id, state) = match remote_cfg.as_ref() {
-        Some(remote_cfg) => (remote_cfg.id, state),
-        None => (0, State::Down),
-      };
-      let pkt = CtrlPacket {
-        ver_and_diag: VerDiag::new(),
-        state_and_flags: StateFlags::new(state, StateFlags::F_AUTH_PRESENT | should_include_final),
-        detect_mult: local_cfg.detect_mult,
-        length: MD5_CTRL_PKT_SIZE as u8,
-        snd_id: local_cfg.id.to_be(),
-        rcv_id: rcv_id.to_be(),
-        des_min_tx_int: local_cfg.des_min_tx_int.to_be(),
-        req_min_rx_int: local_cfg.req_min_rx_int.to_be(),
-        req_min_echo_rx_int: 0,
-      };
-      let auth_header = AuthHeader {
-        typ: local_cfg.auth_type as u8,
-        lenth: 24,
-        key_id: local_cfg.key_id.unwrap_or_default(),
-        __reserved_part_of_pass: 0,
-      };
+      buf[24] = local_cfg.auth_type as u8;
+      buf[25] = 24; // length
+      buf[26] = local_cfg.key_id.unwrap_or_default();
+      buf[27] = 0; // __reserved_part_of_pass
+      buf[28..32].copy_from_slice(bytemuck::bytes_of(&seq));
 
-      buf[..size_of::<CtrlPacket>()].copy_from_slice(bytemuck::bytes_of(&pkt));
-      buf[size_of::<CtrlPacket>()..size_of::<CtrlPacket>() + size_of::<AuthHeader>()]
-        .copy_from_slice(bytemuck::bytes_of(&auth_header));
       let key = match key {
         Some(key) => key,
         None => {
@@ -360,27 +354,20 @@ pub async fn fill_buf(
         }
       };
       let digest = md5::Md5::new()
-        .chain_update(bytemuck::bytes_of(&pkt))
-        .chain_update(bytemuck::bytes_of(&auth_header))
-        .chain_update(bytemuck::bytes_of(&seq.to_be()));
-      let digest = match key.len() > 16 {
-        true => {
-          tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", key.len());
+        .chain_update(&buf[..size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<u32>()]);
+      let digest = match key.len().cmp(&16) {
+        std::cmp::Ordering::Greater => {
           // This does not work
+          tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", key.len());
           let pass = md5::Md5::new().chain_update(&key).finalize();
-          digest
-            // .chain_update(&pass.as_slice()[pass.len() - 16..])
-            .chain_update(&pass)
-            .finalize()
+          digest.chain_update(&pass).finalize()
         }
-        false => {
+        std::cmp::Ordering::Less => {
           let padding: Vec<u8> = (0..16 - key.len()).map(|_| 0u8).collect();
           digest.chain_update(key).chain_update(&padding).finalize()
         }
+        std::cmp::Ordering::Equal => digest.chain_update(key).finalize(),
       };
-      buf[size_of::<CtrlPacket>() + size_of::<AuthHeader>()
-        ..size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<u32>()]
-        .copy_from_slice(bytemuck::bytes_of(&seq.to_be()));
       buf[size_of::<CtrlPacket>() + size_of::<AuthHeader>() + size_of::<u32>()..MD5_CTRL_PKT_SIZE]
         .copy_from_slice(digest.as_slice());
       MD5_CTRL_PKT_SIZE
@@ -420,7 +407,7 @@ pub fn check<'a>(
     AuthType::NoneReserved(_) => todo!(),
     AuthType::Simple(_) => todo!(),
     AuthType::Md5(auth) => {
-      if auth_header.lenth != (size_of::<AuthHeader>() + size_of::<AuthMd5>()) as u8 {
+      if auth_header.length != (size_of::<AuthHeader>() + size_of::<AuthMd5>()) as u8 {
         return None;
       }
       let key = match key {
@@ -434,10 +421,7 @@ pub fn check<'a>(
           tracing::trace!("NOT SUPPORTED PASSWORD LENGTH {}", key.len());
           // This does not work
           let pass = md5::Md5::new().chain_update(&key).finalize();
-          digest
-            // .chain_update(&pass.as_slice()[pass.len() - 16..])
-            .chain_update(&pass)
-            .finalize()
+          digest.chain_update(&pass).finalize()
         }
         false => {
           let padding: Vec<u8> = (0..16 - key.len()).map(|_| 0u8).collect();
@@ -475,9 +459,7 @@ mod test {
         CtrlPacket {
             ver_and_diag: VerDiag {
                 version: 1,
-                diagnostic: Some(
-                    NoDiagnostic,
-                ),
+                diagnostic: NoDiagnostic,
             },
             state_and_flags: StateFlags {
                 state: Down,
@@ -499,14 +481,12 @@ mod test {
       .get_auth_header(&sample_pkt_with_md5_auth)
       .unwrap();
     insta::assert_debug_snapshot!(auth_head, @r###"
-    Some(
-        AuthHeader {
-            typ: 2,
-            lenth: 24,
-            key_id: 1,
-            __reserved_part_of_pass: 0,
-        },
-    )
+    AuthHeader {
+        typ: 2,
+        length: 24,
+        key_id: 1,
+        __reserved_part_of_pass: 0,
+    }
     "###);
 
     let auth_type = auth_head.get_auth_type(&sample_pkt_with_md5_auth);

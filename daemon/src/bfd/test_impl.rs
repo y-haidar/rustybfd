@@ -256,11 +256,8 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
   async fn _serve(mut self, notify_service: Arc<Notif>) -> io::Result<()> {
     let sock = UdpSocket::bind(self.l_sock_addr).await?;
     // TODO: add mhop support
-    // TODO: check if this ttl value is correct for shop
-    // setsockopt(&sock, nix::sys::socket::sockopt::Ipv4Ttl, &1).unwrap();
-    // setsockopt(&sock, nix::sys::socket::sockopt::Ipv6Ttl, &1).unwrap();
 
-    let mut buf = [0; MAX_CTRL_PKT_SIZE * 1];
+    let mut buf = [0u8; MAX_CTRL_PKT_SIZE * 1];
     // let mut buf = bytes::BytesMut::zeroed(MAX_CTRL_PKT_SIZE * 2);
     loop {
       let (len, addr) = sock.recv_from(buf.as_mut()).await?;
@@ -292,50 +289,23 @@ impl<Notif: NotifyBfdSessionDown + Send + Sync + 'static> Bfd<Notif> {
       {
         let mut rpcfg = sess.remote_cfg.write().await;
         *rpcfg = Some(PeerCfg::from_pkt(addr, pkt, auth_header));
-        match &sess.recv_timer {
-          Some(timer) => {
-            let _ = timer.update_timer().await;
-          }
-          None => {
-            sess.recv_timer = Some(TimerCtx::new(PeerCtrlPktRecvTimer {
-              local_cfg: sess.local_cfg.clone(),
-              remote_cfg: sess.remote_cfg.clone(),
-              _notify_service: notify_service.clone(),
-            }));
-          }
-        }
-        sess
-          .remote_state_and_flags
-          .store(pkt.state_and_flags.bits(), Ordering::Release);
       }
-      // TODO: handle poll flag
-      // TODO: handle final flag
 
-      // println!("{:?}", pkt);
-      // let auth_head = pkt.get_auth_header(&buf).unwrap();
-      // println!("{:?}", auth_head);
-      // let auth_type = auth_head.get_auth_type(&buf);
-      // println!("{:?}", auth_type);
-      // println!("{:?} bytes received from {:?}", len, addr);
-      // OUTPUT, recv from cisco router:
-      // CtrlPacket { ver_and_diag: VerDiag { version: 1, diagnostic: Some(NoDiagnostic) }, state_and_flags: StateFlags { state: Down, flags: F_AUTH_PRESENT }, detect_mult: 3, length: 48, snd_id: 1, rcv_id: 0, des_min_tx_int: 1000000, req_min_rx_int: 1000000, req_min_echo_rx_int: 0 }
-      // AuthHeader { typ: 2, lenth: 24, key_id: 1, __reserved_part_of_pass: 0 }
-      // Md5(AuthMd5 { seq: 0, digest: [15, a8, 06, 20, 95, d7, a2, 3d, b2, 43, 5e, 22, 79, 1a, 28, a4] })
-      // 48 bytes received from 172.30.135.1:49152
-
-      // tx.send((buf[..len].to_vec(), addr)).await.unwrap();
-      // tokio::spawn(async move { peer_serve(addr).await });
+      match &sess.recv_timer {
+        Some(timer) => {
+          let _ = timer.update_timer().await;
+        }
+        None => {
+          sess.recv_timer = Some(TimerCtx::new(PeerCtrlPktRecvTimer {
+            local_cfg: sess.local_cfg.clone(),
+            remote_cfg: sess.remote_cfg.clone(),
+            _notify_service: notify_service.clone(),
+          }));
+        }
+      }
+      sess
+        .remote_state_and_flags
+        .store(pkt.state_and_flags.bits(), Ordering::Release);
     }
   }
 }
-
-// async fn peer_serve(remote_addr: SocketAddr) -> io::Result<()> {
-//   let sock = UdpSocket::bind("172.30.135.50:0".parse::<SocketAddr>().unwrap()).await?;
-//   sock.connect(remote_addr).await?;
-//   // println!("connected to peer {:?}", remote_addr);
-//   let mut buf = [0; 1024];
-//   loop {
-//     let len = sock.recv(&mut buf).await?;
-//     println!("{:?} bytes received from peer {:?}", len, remote_addr);
-//   }
-// }
